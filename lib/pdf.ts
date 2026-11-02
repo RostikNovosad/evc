@@ -15,13 +15,19 @@ function row(card: Card): TableCell[] {
   if (card.ipa) word.push({ text: card.ipa, color: MUTED, fontSize: 9 });
   word.push({ text: tags, color: MUTED, fontSize: 8, margin: [0, 2, 0, 0] });
   if (card.relatedPhrases?.length) {
-    word.push({ text: card.relatedPhrases.join(', '), color: MUTED, fontSize: 8, italics: true, margin: [0, 6, 0, 0] });
+    word.push({ text: card.relatedPhrases.join(', '), color: '#5b4b00', fontSize: 9, italics: true, margin: [0, 6, 0, 0] });
   }
 
   const meaning: Content[] = [
     { text: card.definitionEn },
     { text: card.explanationUk, color: MUTED, margin: [0, 4, 0, 0] },
   ];
+  if (card.synonyms?.length) {
+    meaning.push({
+      text: [{ text: 'Синоніми: ', bold: true }, { text: card.synonyms.join(', '), bold: true, color: '#2c3fb3' }],
+      margin: [0, 6, 0, 0],
+    });
+  }
 
   const examples: Content[] = card.examples.map((e) => ({
     margin: [0, 0, 0, 4],

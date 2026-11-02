@@ -2,6 +2,20 @@
 
 Документ для старту проєкту: ідея, архітектура, рішення, роадмапа. Станом на 2026-11-02.
 
+## Поточний стан (прототип)
+
+Це тест ідеї: все максимально просто, частина речей захардкожена. Працює:
+
+- `POST /api/lookup` → Gemini → картка (zod-валідація), приймає `query` і `level`.
+- Сторінка: інпут, перемикач рівня (A1-A2 · B1 · B2 · C1 · C2) і акценту (US/UK), лоадер, картка результату, кнопка "Додати до словника".
+- Бічна панель "Словник" (оверлей по кнопці меню з бейджем кількості): список доданих карток, "Очистити", "Згенерувати PDF". Словник зберігається в `localStorage` (`lexi:session`).
+- PDF на клієнті (pdfmake): заголовок "Словник - ДД.ММ.РРРР", таблиця з повною інформацією картки (слово, IPA, тип, переклад, значення, нюанси, синоніми, приклади, пов'язані вирази).
+- Озвучення слова та прикладів через Web Speech API (без витрат ліміту Gemini).
+- Таймаут запиту 60 с на клієнті (55 с на сервері), помилка з кнопкою "Повторити".
+- Сирий JSON відповіді лишено під карткою (згорнутий блок) для дебагу.
+
+Ще не зроблено: кеш відповідей (`lexi:cache`), захист ендпоінта, повторна спроба при невалідному JSON, `scripts/probe.ts`, `FINDINGS.md`, деплой.
+
 ---
 
 ## 1. Ідея
@@ -30,7 +44,7 @@
 
 Словникові API (Cambridge, Merriam-Webster, dictionaryapi.dev) не підходять як основа: Cambridge API доступний за заявкою, переважно для комерційних партнерів; решта безкоштовних слабкі на ідіомах і не дають українського перекладу. LLM віддає все одним запитом: тип запису, переклад, пояснення, приклади, нюанси.
 
-- Модель за замовчуванням: `gemini-3.5-flash-lite` (або `gemini-3.1-flash-lite`, `gemini-2.5-flash-lite`). Модель задається змінною середовища, перемикання без зміни коду.
+- Модель за замовчуванням: `gemini-3.5-flash-lite` (або `gemini-3.1-flash-lite`). `gemini-2.5-flash-lite` для нових ключів недоступна (404). Модель задається змінною середовища `GEMINI_MODEL`, перемикання без зміни коду.
 - Безкоштовний тариф існує, але **числа лімітів Google не публікує в документації**. Фактичні RPM/TPM/RPD дивитися в AI Studio → Rate limit для свого проєкту. Це перший пункт Фази 0.
 - На безкоштовному тарифі запити можуть використовуватися Google для покращення продуктів. Для словникових слів це неважливо.
 - Орієнтовна вартість на платному: ~300 токенів на вхід + ~400 на вихід → центи за сотні слів.
@@ -84,20 +98,20 @@ Next.js Route Handler (Vercel)
 ### Структура репозиторію
 
 ```
-lexi/
+evc/
 ├─ app/
-│  ├─ api/lookup/route.ts      # POST: запит до Gemini
-│  ├─ page.tsx                 # UI (Фаза 2+)
-│  └─ layout.tsx
+│  ├─ api/lookup/route.ts      # POST: валідація, запит до Gemini, коди помилок
+│  ├─ page.tsx                 # UI: пошук, картка, словник-оверлей, PDF, озвучення
+│  ├─ layout.tsx               # шрифти (Bricolage Grotesque, Figtree, Fragment Mono)
+│  └─ globals.css              # токени й стилі
 ├─ lib/
-│  ├─ gemini.ts                # клієнт, промпт, схема, виклик
-│  ├─ schema.ts                # zod-схема + TS-типи Card
-│  ├─ normalize.ts             # нормалізація query
-│  └─ storage.ts               # інтерфейс Storage + localStorage-реалізація
-├─ scripts/
-│  └─ probe.ts                 # Фаза 0: пакетне тестування API
+│  ├─ gemini.ts                # клієнт, системний промпт за рівнем, виклик
+│  ├─ schema.ts                # zod-схема Card, LEVELS, типи
+│  ├─ pdf.ts                   # генерація PDF (pdfmake, Noto Sans)
+│  └─ speak.ts                 # озвучення (Web Speech API)
+├─ public/fonts/               # NotoSans Regular/Bold/Italic (кирилиця + IPA)
 ├─ .env.local                  # GEMINI_API_KEY, GEMINI_MODEL
-└─ LEXI_PROJECT.md
+└─ doc.md
 ```
 
 ### Змінні середовища
@@ -115,16 +129,18 @@ GEMINI_MODEL=gemini-3.5-flash-lite
 
 ### `POST /api/lookup`
 
-Запит:
+Запит (`level` необов'язковий, один з `A1-A2`, `B1`, `B2`, `C1`, `C2`, за замовчуванням `C1`):
 
 ```json
-{ "query": "break the ice" }
+{ "query": "break the ice", "level": "B2" }
 ```
+
+Рівень впливає на те, яке значення неоднозначного слова пояснюється (найпоширеніше для A1-B2, нюансоване для C1-C2) і на складність мови. У `query` можна додати підказку в дужках: `bank (river)`, або передати речення з виразом.
 
 Успіх `200`:
 
 ```json
-{ "card": { ... }, "meta": { "model": "...", "inputTokens": 0, "outputTokens": 0, "latencyMs": 0 } }
+{ "card": { ... }, "meta": { "model": "...", "level": "C1", "inputTokens": 0, "outputTokens": 0, "latencyMs": 0 } }
 ```
 
 Помилки (тіло `{ "error": { "code": "...", "message": "..." } }`):
@@ -132,7 +148,7 @@ GEMINI_MODEL=gemini-3.5-flash-lite
 - `400` порожній/задовгий query (ліміт, напр., 100 символів).
 - `429` ліміт Gemini вичерпано (передати `retryAfter`, якщо є).
 - `502` Gemini повернув невалідний JSON / помилку.
-- `500` решта.
+- `500` решта (зокрема таймаут виклику Gemini, 55 с).
 
 `meta` потрібна на етапі дослідження (токени, затримка). Пізніше можна прибрати.
 
@@ -152,7 +168,8 @@ type Card = {
   explanationUk: string; // пояснення українською, нюанси вживання
   register?: 'formal' | 'neutral' | 'informal' | 'slang';
   examples: { en: string; uk: string }[]; // 2–3 приклади
-  relatedPhrases?: string[]; // синоніми/пов'язані вирази
+  synonyms?: string[]; // 3–5 синонімів для пояснюваного значення, під рівень
+  relatedPhrases?: string[]; // пов'язані вирази, колокації
   corrected?: string; // якщо виявлена помилка в написанні
   confidence: 'high' | 'medium' | 'low'; // самооцінка моделі
 };
@@ -162,9 +179,11 @@ type Card = {
 
 ### Промпт (чернетка)
 
-System:
+System (шаблон, `{level}` і `{LEVEL_GUIDE}` підставляються з `lib/gemini.ts`):
 
-> You are a bilingual English–Ukrainian dictionary for an intermediate learner. For the user's input (a word, idiom, phrasal verb or phrase) return ONE JSON object matching the schema. Rules: detect the entry type; fix obvious typos and put the fixed form in `corrected`; give 2–3 natural, realistic example sentences with Ukrainian translations; explain nuance and register; if the input is not a real English expression, set type "unknown" and confidence "low" instead of inventing a meaning. Keep definitions short and simple.
+> You are a bilingual English–Ukrainian dictionary for a CEFR {level} learner. The learner's level decides WHICH sense of an ambiguous entry to explain and how complex the language is: {LEVEL_GUIDE} The input may carry a hint in parentheses, e.g. "bank (river)": use that sense. If the input is a full sentence containing the target expression, explain the expression as used there. Return ONE JSON object matching the schema. Rules: detect the entry type; fix obvious typos and put the fixed form in `corrected`; give 2–3 natural, realistic example sentences with Ukrainian translations; give 3–5 `synonyms` for the explained sense, suitable for the {level} level; explain nuance and register; if the input is not a real English expression, set type "unknown" and confidence "low" instead of inventing a meaning. Keep definitions concise.
+
+`LEVEL_GUIDE` по рівнях: A1-A2 — базове буквальне значення, дуже прості слова; B1 — найпоширеніше повсякденне значення; B2 — найпоширеніше + коротка нотатка про частий другий сенс; C1 — без примітивних значень, нюанси, колокації, регістр; C2 — майже носій: тонкі відтінки, рідкісні й переносні значення, стилістика.
 
 Використати structured output: `responseMimeType: "application/json"` + схема відповіді в конфігу виклику (`@google/genai`). Точний синтаксис схеми звірити з поточною документацією SDK, вона змінюється.
 
@@ -177,9 +196,9 @@ System:
 Мета: зрозуміти, що саме віддає Gemini, якої якості, і які ліміти.
 
 - [ ] Створити ключ в AI Studio; зафіксувати в записах ліміти зі сторінки **AI Studio → Rate limit** для обраних моделей (RPM/TPM/RPD).
-- [ ] `npx create-next-app@latest lexi` (TypeScript, App Router), додати `@google/genai`, `zod`.
-- [ ] `lib/schema.ts`, `lib/gemini.ts` (промпт + схема + виклик + парсинг).
-- [ ] `app/api/lookup/route.ts`; перевірка через `curl`:
+- [x] `create-next-app` (TypeScript, App Router), додано `@google/genai`, `zod`.
+- [x] `lib/schema.ts`, `lib/gemini.ts` (промпт + схема + виклик + парсинг).
+- [x] `app/api/lookup/route.ts`; перевірка через `curl`:
   ```bash
   curl -s -X POST localhost:3000/api/lookup -H 'content-type: application/json' -d '{"query":"break the ice"}'
   ```
@@ -195,7 +214,8 @@ System:
 ### Фаза 1 — Надійний бекенд
 
 - [ ] Нормалізація query (`lib/normalize.ts`), обмеження довжини.
-- [ ] Повторна спроба при невалідному JSON; таймаут запиту.
+- [ ] Повторна спроба при невалідному JSON.
+- [x] Таймаут запиту (клієнт 60 с, сервер 55 с), кнопка "Повторити" в UI.
 - [ ] Коректна обробка `429` (повідомлення + `retryAfter`).
 - [ ] Прості rate-limit/захист ендпоінта (щоб чужий не спалив квоту): мінімум — секретний заголовок/пароль із env, перевірка на сервері.
 - [ ] (Опц.) Серверний кеш в Upstash/Vercel KV.
@@ -203,17 +223,17 @@ System:
 
 ### Фаза 2 — UI
 
-- [ ] Екран сесії: інпут, список карток, стани завантаження/помилки/ліміту.
-- [ ] Компонент картки (тип, переклад, приклади, регістр, IPA).
-- [ ] `lib/storage.ts`: `session` + `cache`; відновлення сесії після перезавантаження сторінки.
-- [ ] Дії: видалити картку, повторити запит, редагувати.
+- [x] Екран: інпут, перемикач рівня й акценту, лоадер, помилка з повтором. Список карток живе в бічній панелі "Словник" (оверлей).
+- [x] Компонент картки (тип, переклад, значення, нюанси, приклади, синоніми, пов'язані вирази, регістр, IPA).
+- [~] Сесія (`lexi:session`) зберігається в `localStorage` прямо в `page.tsx`, відновлюється після перезавантаження. `lib/storage.ts` з інтерфейсом і `lexi:cache` ще немає.
+- [~] Дії: видалити картку і повторити запит є; редагування немає.
 - [ ] Клієнтський кеш: перед запитом перевіряти `lexi:cache`.
 
 ### Фаза 3 — Завершення сесії та PDF
 
-- [ ] Генерація PDF (pdfmake/jsPDF) з кирилицею: заголовок із датою, список карток, приклади.
-- [ ] Після успішного збереження PDF очищати `lexi:session` (з підтвердженням).
-- [ ] Кнопка "Завантажити PDF без очищення" на випадок помилки.
+- [x] Генерація PDF (pdfmake) з кирилицею та IPA (Noto Sans у `public/fonts`): заголовок "Словник - ДД.ММ.РРРР", таблиця з повною інформацією карток.
+- [ ] Після успішного збереження PDF очищати словник (з підтвердженням). Зараз очищення тільки кнопкою "Очистити".
+- [x] PDF завантажується без автоматичного очищення словника.
 
 ### Фаза 4 — Деплой на Vercel
 
@@ -225,7 +245,8 @@ System:
 
 - [ ] Власний словник (збереження карток між сесіями), експорт/імпорт JSON.
 - [ ] Supabase для синхронізації між пристроями.
-- [ ] Озвучення (Gemini TTS модель або Web Speech API), IPA/аудіо зі словникових API.
+- [x] Озвучення через Web Speech API (US/UK, слово і приклади). Gemini TTS з кешем лишається апгрейдом, якщо голос не влаштує.
+- [ ] Аудіо зі словникових API.
 - [ ] Повторення за інтервалами (SRS), прості вправи на основі карток.
 - [ ] Пакетне додавання слів (список → batch).
 
@@ -241,7 +262,7 @@ System:
 | Хтось знайде URL і витрачатиме квоту        | Захист ендпоінта секретом, окремий ліміт на Vercel                                                       |
 | Втрата даних у localStorage                 | Експорт JSON; PDF як основний артефакт; IndexedDB за потреби                                             |
 | Зміни моделей/цін Google                    | Модель у конфігу; не зашивати назви в код; перевіряти deprecations                                       |
-| Кирилиця в PDF                              | Одразу підключити шрифт із підтримкою кирилиці                                                           |
+| Кирилиця й IPA в PDF                        | Roboto з pdfmake не має більшості IPA-символів; використано Noto Sans із `public/fonts` (кирилиця + IPA)  |
 
 ---
 
